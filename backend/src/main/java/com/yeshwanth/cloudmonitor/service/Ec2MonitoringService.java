@@ -1,86 +1,127 @@
 package com.yeshwanth.cloudmonitor.service;
 
+import com.yeshwanth.cloudmonitor.config.AwsProperties;
+import com.yeshwanth.cloudmonitor.dto.InstanceSummary;
+import com.yeshwanth.cloudmonitor.dto.MetricPoint;
+import com.yeshwanth.cloudmonitor.dto.MetricSeries;
 import org.springframework.stereotype.Service;
 import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
 import software.amazon.awssdk.services.cloudwatch.model.Dimension;
 import software.amazon.awssdk.services.cloudwatch.model.GetMetricDataRequest;
+import software.amazon.awssdk.services.cloudwatch.model.GetMetricDataResponse;
 import software.amazon.awssdk.services.cloudwatch.model.Metric;
 import software.amazon.awssdk.services.cloudwatch.model.MetricDataQuery;
+import software.amazon.awssdk.services.cloudwatch.model.MetricDataResult;
 import software.amazon.awssdk.services.cloudwatch.model.MetricStat;
 import software.amazon.awssdk.services.cloudwatch.model.Statistic;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.DescribeInstancesRequest;
-import software.amazon.awssdk.services.ec2.model.Instance;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
+/**
+ * Reads the EC2 inventory and CloudWatch CPU history for the account in
+ * {@link AwsProperties#region()}.
+ */
 @Service
 public class Ec2MonitoringService {
-    private final Ec2Client ec2;
-    private final CloudWatchClient cloudWatch;
-    private final boolean demo = Boolean.parseBoolean(System.getenv().getOrDefault("DEMO_MODE", "true"));
 
-    public Ec2MonitoringService(Ec2Client ec2, CloudWatchClient cloudWatch) {
-        this.ec2 = ec2;
-        this.cloudWatch = cloudWatch;
+    private static final String CPU_METRIC = "CPUUtilization";
+    private static final String CPU_UNIT = "percent";
+    private static final String NAMESPACE = "AWS/EC2";
+    private static final String QUERY_ID = "cpu";
+
+    private final Ec2Client ec2Client;
+    private final CloudWatchClient cloudWatchClient;
+    private final AwsProperties properties;
+    private final DemoData demoData;
+
+    public Ec2MonitoringService(Ec2Client ec2Client,
+                               CloudWatchClient cloudWatchClient,
+                               AwsProperties properties,
+                               DemoData demoData) {
+        this.ec2Client = ec2Client;
+        this.cloudWatchClient = cloudWatchClient;
+        this.properties = properties;
+        this.demoData = demoData;
     }
 
-    public List<Map<String, Object>> instances() {
-        if (demo) return demoInstances();
-        var response = ec2.describeInstances(DescribeInstancesRequest.builder().build());
-        List<Map<String, Object>> result = new ArrayList<>();
-        response.reservations().forEach(r -> r.instances().forEach(i -> result.add(instanceMap(i))));
-        return result;
+    public List<InstanceSummary> instances() {
+        if (properties.demoMode()) {
+            return demoData.instances();
+        }
+        return ec2Client.describeInstances(DescribeInstancesRequest.builder().build())
+                .reservations()
+                .stream()
+                .flatMap(reservation -> reservation.instances().stream())
+                .map(InstanceSummary::from)
+                .toList();
     }
 
-    public Map<String, Object> cpu(String instanceId, int hours) {
-        if (demo) return demoCpu(instanceId, hours);
+    /**
+     * @param instanceId EC2 instance id to read
+     * @param hours      look-back window in hours; already range-checked by the controller
+     */
+    public MetricSeries cpuHistory(String instanceId, int hours) {
+        int periodSeconds = periodFor(hours);
+        if (properties.demoMode()) {
+            return demoData.cpuHistory(instanceId, hours, periodSeconds);
+        }
+
         Instant end = Instant.now();
         Instant start = end.minus(hours, ChronoUnit.HOURS);
-        Metric metric = Metric.builder().namespace("AWS/EC2").metricName("CPUUtilization")
-                .dimensions(Dimension.builder().name("InstanceId").value(instanceId).build()).build();
-        MetricStat stat = MetricStat.builder().metric(metric).period(300).stat(Statistic.AVERAGE).build();
-        MetricDataQuery query = MetricDataQuery.builder().id("cpu").metricStat(stat).returnData(true).build();
-        var response = cloudWatch.getMetricData(GetMetricDataRequest.builder().startTime(start).endTime(end).metricDataQueries(query).build());
-        return Map.of("instanceId", instanceId, "metric", "CPUUtilization", "timestamps", response.metricDataResults().isEmpty() ? List.of() : response.metricDataResults().get(0).timestamps(), "values", response.metricDataResults().isEmpty() ? List.of() : response.metricDataResults().get(0).values());
+        GetMetricDataResponse response = cloudWatchClient.getMetricData(GetMetricDataRequest.builder()
+                .startTime(start)
+                .endTime(end)
+                .metricDataQueries(MetricDataQuery.builder()
+                        .id(QUERY_ID)
+                        .returnData(true)
+                        .metricStat(MetricStat.builder()
+                                .metric(Metric.builder()
+                                        .namespace(NAMESPACE)
+                                        .metricName(CPU_METRIC)
+                                        .dimensions(Dimension.builder()
+                                                .name("InstanceId")
+                                                .value(instanceId)
+                                                .build())
+                                        .build())
+                                .period(periodSeconds)
+                                .stat(Statistic.AVERAGE)
+                                .build())
+                        .build())
+                .build());
+
+        return toSeries(instanceId, periodSeconds, response);
     }
 
-    private List<Map<String, Object>> demoInstances() {
-        return List.of(
-            Map.of("id","i-demo-001","name","api-server","type","t3.micro","state","running","privateIp","10.0.1.10","publicIp","54.10.10.10","launchTime",Instant.now().minus(18,ChronoUnit.DAYS)),
-            Map.of("id","i-demo-002","name","worker-node","type","t3.small","state","running","privateIp","10.0.1.11","publicIp","54.10.10.11","launchTime",Instant.now().minus(11,ChronoUnit.DAYS)),
-            Map.of("id","i-demo-003","name","staging-server","type","t3.micro","state","stopped","privateIp","10.0.1.12","publicIp","54.10.10.12","launchTime",Instant.now().minus(30,ChronoUnit.DAYS))
-        );
-    }
-
-    private Map<String, Object> demoCpu(String instanceId, int hours) {
-        int points = Math.max(6, Math.min(hours * 12, 36));
-        List<String> timestamps = new ArrayList<>();
-        List<Double> values = new ArrayList<>();
-        Instant end = Instant.now();
-        int seed = Math.abs(instanceId.hashCode() % 17);
-        for (int i = points - 1; i >= 0; i--) {
-            timestamps.add(end.minus(i * 5L, ChronoUnit.MINUTES).toString());
-            double value = 25 + seed + 12 * Math.sin((points - i) * 0.55) + (i % 5) * 1.7;
-            values.add(Math.round(Math.max(4, Math.min(92, value)) * 100.0) / 100.0);
+    /** Coarser resolution for longer windows keeps every CloudWatch response inside its limits. */
+    static int periodFor(int hours) {
+        if (hours <= 1) {
+            return 60;
         }
-        return Map.of("instanceId", instanceId, "metric", "CPUUtilization", "timestamps", timestamps, "values", values, "source", "DEMO_MODE");
+        if (hours <= 12) {
+            return 300;
+        }
+        return 900;
     }
 
-    private Map<String, Object> instanceMap(Instance i) {
-        Map<String, Object> m = new HashMap<>();
-        m.put("id", i.instanceId());
-        m.put("name", i.tags().stream().filter(t -> "Name".equals(t.key())).map(t -> t.value()).findFirst().orElse(i.instanceId()));
-        m.put("type", i.instanceTypeAsString());
-        m.put("state", i.state().nameAsString());
-        m.put("privateIp", i.privateIpAddress());
-        m.put("publicIp", i.publicIpAddress());
-        m.put("launchTime", i.launchTime());
-        return m;
+    private MetricSeries toSeries(String instanceId, int periodSeconds, GetMetricDataResponse response) {
+        List<MetricDataResult> results = response.metricDataResults();
+        if (results.isEmpty() || results.get(0).timestamps().isEmpty()) {
+            return MetricSeries.empty(instanceId, CPU_METRIC, CPU_UNIT, MetricSeries.Source.AWS, periodSeconds);
+        }
+        MetricDataResult result = results.get(0);
+        List<Instant> timestamps = result.timestamps();
+        List<Double> values = result.values();
+        int size = Math.min(timestamps.size(), values.size());
+        List<MetricPoint> points = new ArrayList<>(size);
+        for (int i = 0; i < size; i++) {
+            points.add(new MetricPoint(timestamps.get(i), values.get(i)));
+        }
+        return new MetricSeries(instanceId, CPU_METRIC, CPU_UNIT, MetricSeries.Source.AWS,
+                periodSeconds, List.copyOf(points));
     }
 }

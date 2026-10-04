@@ -2,15 +2,20 @@
 target/
 *.class
 *.jar
+*.war
 
 # Spring
 *.log
+spring-shell.log
 
 # Node
 node_modules/
 dist/
 build/
 .npm-debug.log*
+.vite/
+npm-debug.log*
+yarn-error.log*
 
 # IDE
 .idea/
@@ -18,10 +23,18 @@ build/
 *.iml
 
 # Environment / secrets
+# (.env.example is tracked on purpose: it documents the available keys and holds no values.)
 .env
 .env.*
+!.env.example
 application-local.yml
 application-local.properties
+awsCredentials.json
+
+# Test / coverage output
+coverage/
+backend/**/surefire-reports/
+backend/**/failsafe-reports/
 
 # OS
 .DS_Store

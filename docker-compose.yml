@@ -1,30 +1,37 @@
-services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: cloud_monitor
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports: ["5432:5432"]
-    volumes: ["postgres_data:/var/lib/postgresql/data"]
+name: cloud-resource-monitoring-dashboard
 
+# Frontend (nginx) + backend (Spring Boot). The nginx config proxies /api to the backend, so the
+# browser only ever talks to one origin and no CORS configuration is required.
+services:
   backend:
     build: ./backend
+    image: cloud-monitor-backend:local
     environment:
-      DB_URL: jdbc:postgresql://postgres:5432/cloud_monitor
-      DB_USERNAME: postgres
-      DB_PASSWORD: postgres
       AWS_REGION: ${AWS_REGION:-ap-south-1}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      # true serves generated instances/metrics; set DEMO_MODE=false in your shell (with AWS
+      # credentials available) to read a real account.
+      DEMO_MODE: ${DEMO_MODE:-true}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
       JWT_SECRET: ${JWT_SECRET:-change-this-development-secret-to-a-long-random-value-1234567890}
-    ports: ["8080:8080"]
-    depends_on: [postgres]
+      JWT_ACCESS_TOKEN_TTL: ${JWT_ACCESS_TOKEN_TTL:-8h}
+      DEMO_USERNAME: ${DEMO_USERNAME:-admin}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-admin123}
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/actuator/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 40s
 
   frontend:
     build: ./frontend
-    ports: ["3000:80"]
-    depends_on: [backend]
-
-volumes:
-  postgres_data:
+    image: cloud-monitor-frontend:local
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
